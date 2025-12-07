@@ -3,7 +3,7 @@ import asyncio
 import logging
 import sqlite3
 from aiogram import Bot, Dispatcher, Router, types
-from aiogram.filters import Command, Text
+from aiogram.filters import Command
 
 # ==========================
 # ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
@@ -115,7 +115,7 @@ async def start_cmd(message: types.Message):
     await message.answer(questions[0][0], reply_markup=keyboard)
 
 # ==========================
-# Получение ответов от пользователя
+# Получение ответов
 # ==========================
 @router.message()
 async def process_answers(message: types.Message):
@@ -137,7 +137,6 @@ async def process_answers(message: types.Message):
     if step < len(questions):
         await message.answer(questions[step][0])
     else:
-        # Анкета завершена, отправляем админам
         app = get_app(uid)
         user_info = f"Заявка от @{app['username']} (ID: {uid})"
         private_lines = ["Приватная анкета:\n"]
@@ -166,76 +165,78 @@ async def process_answers(message: types.Message):
         await message.answer("Анкета отправлена администраторам!")
 
 # ==========================
-# Callback кнопки
+# CALLBACK QUERY
 # ==========================
-@router.callback_query(Text("show_public"))
-async def show_public(callback: types.CallbackQuery):
-    cursor.execute("SELECT * FROM applications WHERE status='accepted'")
-    rows = cursor.fetchall()
-    if not rows:
-        await callback.message.answer("Публичных анкет пока нет.")
-        return await callback.answer()
+@router.callback_query()
+async def callback_handler(callback: types.CallbackQuery):
+    data = callback.data
+    uid = callback.from_user.id
 
-    for row in rows:
-        app = dict(zip([c[0] for c in cursor.description], row))
-        lines = [f"Публичная анкета @{app['username']}:\n"]
+    # Показ публичных анкет
+    if data == "show_public":
+        cursor.execute("SELECT * FROM applications WHERE status='accepted'")
+        rows = cursor.fetchall()
+        if not rows:
+            await callback.message.answer("Публичных анкет пока нет.")
+            return await callback.answer()
+        for row in rows:
+            app = dict(zip([c[0] for c in cursor.description], row))
+            lines = [f"Публичная анкета @{app['username']}:\n"]
+            for q_text, key in questions:
+                if key in PRIVATE_FIELDS:
+                    continue
+                lines.append(f"{q_text} {app.get(key,'')}")
+            await callback.message.answer("\n".join(lines))
+        await callback.answer()
+        return
+
+    # Проверка админа
+    if uid not in ADMINS:
+        return await callback.answer("Только админы могут использовать эту кнопку.", show_alert=True)
+
+    # Приватная анкета
+    if data.startswith("show_private_"):
+        target_id = int(data.split("_")[2])
+        app = get_app(target_id)
+        lines = ["Приватная анкета:\n"]
         for q_text, key in questions:
-            if key in PRIVATE_FIELDS:
-                continue
             lines.append(f"{q_text} {app.get(key,'')}")
         await callback.message.answer("\n".join(lines))
-    await callback.answer()
+        await callback.answer()
+        return
 
-@router.callback_query(Text(startswith="show_private_"))
-async def show_private(callback: types.CallbackQuery):
-    uid = int(callback.data.split("_")[2])
-    if callback.from_user.id not in ADMINS:
-        return await callback.answer("Недоступно", show_alert=True)
-
-    app = get_app(uid)
-    lines = ["Приватная анкета:\n"]
-    for q_text, key in questions:
-        lines.append(f"{q_text} {app.get(key,'')}")
-    await callback.message.answer("\n".join(lines))
-    await callback.answer()
-
-@router.callback_query(Text(startswith="accept_"))
-async def accept(callback: types.CallbackQuery):
-    uid = int(callback.data.split("_")[1])
-    if callback.from_user.id not in ADMINS:
-        return await callback.answer("Недоступно", show_alert=True)
-
-    set_status(uid, "accepted")
-    app = get_app(uid)
-    try:
-        await bot.send_message(uid, f"🎉 Поздравляем! Ваша заявка принята.\nВступайте в группу: {GROUP_LINK}")
-    except:
-        pass
-
-    # отправляем публичную версию админам
-    lines = [f"Публичная анкета @{app['username']}:\n"]
-    for q_text, key in questions:
-        if key not in PRIVATE_FIELDS:
-            lines.append(f"{q_text} {app.get(key,'')}")
-    for admin in ADMINS:
+    # Принять
+    if data.startswith("accept_"):
+        target_id = int(data.split("_")[1])
+        set_status(target_id, "accepted")
+        app = get_app(target_id)
         try:
-            await bot.send_message(admin, "\n".join(lines))
+            await bot.send_message(target_id, f"🎉 Поздравляем! Ваша заявка принята.\nВступайте в группу: {GROUP_LINK}")
         except:
             pass
-    await callback.answer("Принято!")
+        # Отправка публичной версии админам
+        lines = [f"Публичная анкета @{app['username']}:\n"]
+        for q_text, key in questions:
+            if key not in PRIVATE_FIELDS:
+                lines.append(f"{q_text} {app.get(key,'')}")
+        for admin in ADMINS:
+            try:
+                await bot.send_message(admin, "\n".join(lines))
+            except:
+                pass
+        await callback.answer("Принято!")
+        return
 
-@router.callback_query(Text(startswith="reject_"))
-async def reject(callback: types.CallbackQuery):
-    uid = int(callback.data.split("_")[1])
-    if callback.from_user.id not in ADMINS:
-        return await callback.answer("Недоступно", show_alert=True)
-
-    set_status(uid, "rejected")
-    try:
-        await bot.send_message(uid, "❌ К сожалению, ваша заявка отклонена.")
-    except:
-        pass
-    await callback.answer("Отклонено!")
+    # Отклонить
+    if data.startswith("reject_"):
+        target_id = int(data.split("_")[1])
+        set_status(target_id, "rejected")
+        try:
+            await bot.send_message(target_id, "❌ К сожалению, ваша заявка отклонена.")
+        except:
+            pass
+        await callback.answer("Отклонено!")
+        return
 
 # ==========================
 # ЗАПУСК БОТА
@@ -246,3 +247,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
